@@ -1,0 +1,10 @@
+/bin/
+*.test
+*.out
+benchmarks/results/*.jsonl
+benchmarks/results/*.csv
+!benchmarks/results/.gitkeep
+crates/target/
+__pycache__/
+*.pyc
+.venv/
