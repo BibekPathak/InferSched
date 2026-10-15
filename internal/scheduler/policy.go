@@ -23,3 +23,18 @@ type Policy interface {
 	// repeated runs with the same seed are identical.
 	Reset()
 }
+
+// Registry returns the built-in policies keyed by their stable name, each with
+// default configuration. Callers that need non-default weights construct the
+// policy directly (e.g. NewHybrid, NewSJF). The reference-time providers
+// (NowFunc) are left nil; the coordinator/simulator wires a monotonic clock so
+// that aging and deadline terms are evaluated at a deterministic instant.
+func Registry() map[string]Policy {
+	return map[string]Policy{
+		"fifo":     NewFIFO(),
+		"priority": NewPriority(Aging{}),
+		"sjf":      NewSJF(DefaultCostModel()),
+		"edf":      NewEDF(DefaultCostModel()),
+		"hybrid":   NewHybrid(DefaultHybridWeights(), DefaultCostModel()),
+	}
+}

@@ -10,17 +10,20 @@ reproducible benchmark suite. It is **not** an API wrapper around a model server
 
 ## Status
 
-**Phase 1 complete.** Implemented:
+**Phase 2 complete.** Implemented:
 
 - Request model and an explicit, validated lifecycle state machine.
-- The `SchedulingPolicy` interface and the FIFO baseline.
+- The `SchedulingPolicy` interface and five policies: FIFO, Priority, SJF,
+  EDF, and the deadline-aware Hybrid — all sharing deterministic tie-breaking.
+- An optional aging mechanism for starvation protection.
 - A versioned, reproducible JSONL workload-trace format with load/validate/write.
 - Architecture and scheduling-policy documentation.
-- Unit tests for the state machine, FIFO, and trace round-tripping.
+- Unit tests for the state machine, all policies, ordering determinism, and
+  trace round-tripping.
 
 Not yet implemented (see [docs/architecture.md](docs/architecture.md) for the
 full phase map): admission control, resource accounting, the simulator, the HTTP
-API, metrics, and the remaining scheduling policies.
+API, metrics, and the Rust core.
 
 ## Requirements
 
@@ -69,7 +72,7 @@ trace benchmarks/workloads/sample-short-interactive.jsonl: valid v1
 ```
 cmd/infersched/        runtime coordinator entrypoint
 internal/lifecycle/    request model + state machine            (Phase 1)
-internal/scheduler/    SchedulingPolicy interface + FIFO        (Phase 1)
+internal/scheduler/    SchedulingPolicy interface + policies      (Phase 1-2)
 internal/workload/     versioned JSONL trace format             (Phase 1)
 internal/admission/    bounded admission control                (Phase 3)
 internal/resources/    compute + KV-cache accounting            (Phase 3)

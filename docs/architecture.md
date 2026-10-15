@@ -14,7 +14,7 @@ can tell what is implemented from what is planned.
 | 1 | Request ingress + validation | `internal/api` | 6 |
 | 2 | Bounded admission controller | `internal/admission` | 3 |
 | 3 | Request metadata + lifecycle | `internal/lifecycle` | **1** |
-| 4 | Scheduling policy engine | `internal/scheduler` | **1** (interface + FIFO), 2 (rest) |
+| 4 | Scheduling policy engine | `internal/scheduler` | 1 (interface + FIFO), **2** (priority, SJF, EDF, hybrid, aging) |
 | 5 | Compute + memory resource manager | `internal/resources` | 3 |
 | 6 | Continuous-batching simulator | `simulator/` | 4 |
 | 7 | Execution backend interface | `internal/backend` | 4/6 |
@@ -107,9 +107,10 @@ they return a deterministic ordering. Ties are always broken by a stable key
 (arrival, then request ID) so that runs are reproducible. `Reset` clears any
 per-run state (e.g. aging counters) before a trace replay.
 
-Phase 1 ships `FIFO`. Phase 2 adds priority, shortest-estimated-work-first,
-earliest-deadline-first, a deadline-aware hybrid, and optional aging. See
-[`scheduling-policies.md`](scheduling-policies.md).
+Phase 1 shipped `FIFO`. Phase 2 adds priority, shortest-estimated-work-first,
+earliest-deadline-first, a deadline-aware hybrid, and optional aging, all sharing
+the same deterministic tie-breaking (`orderBy` falls back to arrival then ID).
+See [`scheduling-policies.md`](scheduling-policies.md).
 
 ## Workload traces
 
