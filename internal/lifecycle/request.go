@@ -118,6 +118,24 @@ func (r *Request) State() State {
 // HasDeadline reports whether the request carries a deadline.
 func (r *Request) HasDeadline() bool { return r.Deadline != 0 }
 
+// Clone returns a fresh request in the QUEUED state carrying the same immutable
+// metadata as r. It is used by the simulator so repeated runs start from
+// identical, independent request sets and the caller's slice is never mutated.
+func (r *Request) Clone() *Request {
+	return &Request{
+		ID:               r.ID,
+		TenantID:         r.TenantID,
+		Class:            r.Class,
+		Priority:         r.Priority,
+		WallClockArrival: r.WallClockArrival,
+		Arrival:          r.Arrival,
+		Deadline:         r.Deadline,
+		Estimate:         r.Estimate,
+		Ctx:              r.Ctx,
+		state:            StateQueued,
+	}
+}
+
 // transition atomically moves the request to next. It returns a
 // *TransitionError if the move is illegal. On success it returns the previous
 // state so callers can drive exactly-once side effects (e.g. resource release).

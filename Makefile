@@ -30,7 +30,7 @@ run: build
 	$(BIN)
 
 sim:
-	$(GO) run ./simulator/cmd/sim
+	$(GO) run ./simulator/cmd/sim -trace benchmarks/workloads/sample-short-interactive.jsonl
 
 bench:
 	$(PYTHON) benchmarks/scripts/run_benchmarks.py

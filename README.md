@@ -10,26 +10,29 @@ reproducible benchmark suite. It is **not** an API wrapper around a model server
 
 ## Status
 
-**Phase 3 complete.** Implemented:
+**Phase 4 complete.** Implemented:
 
 - Request model and an explicit, validated lifecycle state machine.
 - The `SchedulingPolicy` interface and five policies: FIFO, Priority, SJF,
   EDF, and the deadline-aware Hybrid — all sharing deterministic tie-breaking.
 - An optional aging mechanism for starvation protection.
-- A bounded admission controller with queue-length, queued-token, outstanding,
-  and per-tenant limits, plus immediate-reject and deadline-aware overload
-  strategies with distinct, recorded rejection reasons.
+- A bounded admission controller (queue-length, queued-token, outstanding,
+  per-tenant limits) with immediate-reject and deadline-aware overload
+  strategies and distinct rejection reasons.
 - A concurrency-safe resource manager tracking execution slots, active
-  sequences, and KV-cache blocks with atomic all-or-nothing reservations and
-  exactly-once release.
-- A versioned, reproducible JSONL workload-trace format with load/validate/write.
-- Architecture and scheduling-policy documentation.
-- Unit, invariant, and concurrency (race-tested) tests for the state machine,
-  all policies, resource accounting, admission control, and their integration.
+  sequences, and KV-cache blocks with atomic reservations and exactly-once
+  release.
+- A deterministic discrete-event **continuous-batching simulator** modelling
+  prefill/decode, batching, KV-cache limits, cancellation, deadlines, and worker
+  failure, plus a narrow `ExecutionBackend` interface.
+- A versioned, reproducible JSONL workload-trace format.
+- Architecture, scheduling-policy, and benchmark-methodology documentation.
+- Unit, invariant, concurrency (race-tested), determinism, and integration tests.
 
 Not yet implemented (see [docs/architecture.md](docs/architecture.md) for the
-full phase map): the continuous-batching simulator, the HTTP API, metrics, the
-benchmark harness, and the Rust core.
+full phase map): the Python workload generator, the benchmark harness and
+report, the HTTP API, Prometheus metrics, the coordinator wiring, and the Rust
+core.
 
 ## Requirements
 
@@ -90,6 +93,19 @@ admission demo: benchmarks/workloads/sample-short-interactive.jsonl (policy=sjf)
   reject reasons : map[DEADLINE_INFEASIBLE:2 OVERLOAD_QUEUED_TOKENS:2]
 ```
 
+Replay a trace through the deterministic simulator and compare policies:
+
+```sh
+go run ./simulator/cmd/sim -trace benchmarks/workloads/sample-short-interactive.jsonl
+```
+
+```
+policy      done    rej    exp   fail   canc | p50TTFT p90TTFT p99TTFT |  p50comp  p90comp  p99comp |  thr/s
+fifo           5      0      0      0      0 |     3.0     3.1     3.1 |     97.5    769.5    769.5 |    6.5
+...
+note: SIMULATION output, not real-hardware measurements
+```
+
 ## Repository layout
 
 ```
@@ -98,10 +114,11 @@ internal/lifecycle/    request model + state machine            (Phase 1)
 internal/scheduler/    SchedulingPolicy interface + policies      (Phase 1-2)
 internal/workload/     versioned JSONL trace format             (Phase 1)
 internal/admission/    bounded admission control                (Phase 3)
-internal/resources/    compute + KV-cache accounting            (Phase 3)internal/backend/      execution backend interface              (Phase 4/6)
+internal/resources/    compute + KV-cache accounting            (Phase 3)internal/backend/      execution backend interface              (Phase 4)
 internal/api/          HTTP ingress                             (Phase 6)
 internal/observability/ Prometheus metrics + logs               (Phase 6)
-simulator/             discrete-event continuous batching       (Phase 4)
+internal/simulator/    discrete-event continuous batching        (Phase 4)
+simulator/cmd/sim/     simulator replay CLI                     (Phase 4)
 benchmarks/            workload traces, scripts, results        (Phase 5)
 crates/scheduler-core/ Rust scheduling core (C ABI)             (Phase 7)
 docs/                  architecture, policies, methodology

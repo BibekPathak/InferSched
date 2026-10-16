@@ -16,8 +16,8 @@ can tell what is implemented from what is planned.
 | 3 | Request metadata + lifecycle | `internal/lifecycle` | **1** |
 | 4 | Scheduling policy engine | `internal/scheduler` | 1 (interface + FIFO), **2** (priority, SJF, EDF, hybrid, aging) |
 | 5 | Compute + memory resource manager | `internal/resources` | **3** |
-| 6 | Continuous-batching simulator | `simulator/` | 4 |
-| 7 | Execution backend interface | `internal/backend` | 4/6 |
+| 6 | Continuous-batching simulator | `internal/simulator` | **4** |
+| 7 | Execution backend interface | `internal/backend` | **4** |
 | 8 | Metrics + tracing | `internal/observability` | 6 |
 | 9 | Workload generator + benchmark harness | `benchmarks/`, `internal/workload` | **1** (format), 5 (generator) |
 | — | Coordinator wiring | `internal/coordinator` | 6 |
@@ -104,6 +104,40 @@ KV blocks. A request's KV footprint is `ceil(KVTokens / KVBlockSize)` blocks.
 This is a **model** of resource consumption. It does not allocate GPU memory and
 makes no claim about real device occupancy.
 
+## Continuous-batching simulator and backend interface (components 6 & 7)
+
+### Execution backend interface (`internal/backend`)
+
+`ExecutionBackend` is the narrow seam between the coordinator and whatever runs
+inference: the deterministic simulator, a mock backend for lifecycle/failure
+testing, or a real engine. It deals in `Submit`/`Cancel`/`Results` and reports
+request-level milestones (start, first token, end, outcome). It does **not**
+depend on any model-serving framework.
+
+### Simulator (`internal/simulator`)
+
+A deterministic discrete-event model of continuous-batching inference:
+
+- Events are ordered by `(virtual_time, insertion_sequence)`, so ties break
+  deterministically and a run is reproducible for a fixed seed + trace.
+- Input requests are **cloned**, so repeated runs over the same slice are
+  independent and the caller's slice is never mutated.
+- Workers run up to `MaxBatchSize` sequences; requests join mid-flight and are
+  included in the next step (continuous batching).
+- Prefill and decode have distinct cost curves (`PerfModel`), capturing that
+  prefill scales with prompt tokens and decode costs one step per active
+  sequence, both with configurable batching speedups.
+- KV-cache is block-accounted; a request cannot start without free blocks and
+  releases exactly once on completion, cancellation, expiry, or failure.
+- Cancellation and deadline events are delivered through the same event queue;
+  worker failures fail a worker's active requests and reconcile resources.
+- The scheduling policy's reference clock is wired to virtual time, so aging,
+  deadline, and hybrid terms are evaluated at deterministic instants.
+
+The simulator's assumptions and limitations are specified in
+[`benchmark-methodology.md`](benchmark-methodology.md). **All simulator output is
+modelled, not measured.**
+
 ## Request lifecycle (component 3)
 
 A request is created in `QUEUED` and moves through an explicit, tabulated state
@@ -187,11 +221,12 @@ simulator, or the benchmark harness.
 - Monotonic time everywhere internally.
 - Determinism is a testable property: same seed + same trace ⇒ identical output.
 
-## Limitations (through Phase 3)
+## Limitations (through Phase 4)
 
-- No HTTP API, simulator, or metrics yet.
-- Scheduling policies are implemented but not yet driven end-to-end by a
-  simulator.
-- Admission and resource accounting are implemented and tested in isolation and
-  through an integration pipeline, but are not yet wired into the coordinator.
-- All cost figures are estimates; no real backend has been measured.
+- No HTTP API or metrics yet; the coordinator does not yet wire components
+  together at runtime (the `sim` command drives the simulator directly).
+- Admission, resources, and policies are integrated through the simulator, but
+  the coordinator/API layer that owns their lifecycle is Phase 6.
+- All cost figures are model parameters; no real backend has been measured.
+  Absolute latencies are illustrative; only relative policy behaviour is
+  meaningful until calibration.
