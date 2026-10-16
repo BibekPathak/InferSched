@@ -12,10 +12,10 @@ can tell what is implemented from what is planned.
 | # | Component | Package | Phase |
 |---|-----------|---------|-------|
 | 1 | Request ingress + validation | `internal/api` | 6 |
-| 2 | Bounded admission controller | `internal/admission` | 3 |
+| 2 | Bounded admission controller | `internal/admission` | **3** |
 | 3 | Request metadata + lifecycle | `internal/lifecycle` | **1** |
 | 4 | Scheduling policy engine | `internal/scheduler` | 1 (interface + FIFO), **2** (priority, SJF, EDF, hybrid, aging) |
-| 5 | Compute + memory resource manager | `internal/resources` | 3 |
+| 5 | Compute + memory resource manager | `internal/resources` | **3** |
 | 6 | Continuous-batching simulator | `simulator/` | 4 |
 | 7 | Execution backend interface | `internal/backend` | 4/6 |
 | 8 | Metrics + tracing | `internal/observability` | 6 |
@@ -52,6 +52,57 @@ can tell what is implemented from what is planned.
           ▼
    observability (8): metrics + structured logs
 ```
+
+## Admission control and resource accounting (components 2 & 5)
+
+### Admission controller (`internal/admission`)
+
+The controller bounds the system *before* resources are consumed. `Evaluate(r)`
+is the read-only half of a two-phase admit and returns a `Decision` with a
+bounded `lifecycle.Reason`; the coordinator then reserves resources and calls
+`Commit` (or, on resource failure, commits nothing). This ordering guarantees a
+rejected request never consumes resources and a request that fails reservation
+leaves no partial state.
+
+Hard bounds (all optional, `0` = unlimited):
+
+- `MaxQueueLength` — requests waiting to be admitted.
+- `MaxQueuedTokens` — estimated KV tokens represented by queued requests.
+- `MaxOutstanding` — requests admitted or running.
+- `MaxPerTenant` — outstanding requests per tenant.
+
+Two overload strategies:
+
+1. **`StrategyReject`** — reject any request that would exceed a hard bound.
+2. **`StrategyDeadlineAware`** — additionally reject requests whose deadline is
+   infeasible under a conservative estimate (`remaining < work + slack`). It does
+   not claim deadlines can be met under overload; it rejects what cannot finish.
+
+Every rejection records a distinct reason (`OVERLOAD_QUEUE_LENGTH`,
+`OVERLOAD_QUEUED_TOKENS`, `OVERLOAD_OUTSTANDING_REQUESTS`, `OVERLOAD_TENANT_LIMIT`,
+`DEADLINE_INFEASIBLE`). Requests are never silently dropped.
+
+`Evaluate`/`Commit` counters are single-goroutine by contract (the coordinator
+serializes them); the resource manager is independently concurrent-safe.
+
+### Resource manager (`internal/resources`)
+
+Models `Workers × MaxBatchSize` execution slots and `Workers × KVBlocksPerWorker`
+KV blocks. A request's KV footprint is `ceil(KVTokens / KVBlockSize)` blocks.
+
+- `Reserve` is atomic and all-or-nothing: if any dimension would exceed capacity
+  it returns `ErrInsufficientCapacity` and mutates nothing, so a failed admission
+  rolls back by construction. Reserving an already-reserved request is a no-op
+  returning the existing reservation (idempotent admission).
+- `Release` frees a reservation exactly once; a second release returns
+  `ErrUnknownReservation` and leaves state unchanged, making double release
+  detectable and harmless.
+- `Invariants()` re-derives all totals from the per-request reservations and
+  checks they match the running counters and never exceed capacity. It is used by
+  the concurrency stress tests.
+
+This is a **model** of resource consumption. It does not allocate GPU memory and
+makes no claim about real device occupancy.
 
 ## Request lifecycle (component 3)
 
@@ -136,8 +187,11 @@ simulator, or the benchmark harness.
 - Monotonic time everywhere internally.
 - Determinism is a testable property: same seed + same trace ⇒ identical output.
 
-## Limitations (Phase 1)
+## Limitations (through Phase 3)
 
-- No API, admission control, resource manager, or simulator yet.
-- Only FIFO is implemented.
+- No HTTP API, simulator, or metrics yet.
+- Scheduling policies are implemented but not yet driven end-to-end by a
+  simulator.
+- Admission and resource accounting are implemented and tested in isolation and
+  through an integration pipeline, but are not yet wired into the coordinator.
 - All cost figures are estimates; no real backend has been measured.
