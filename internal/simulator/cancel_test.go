@@ -44,9 +44,9 @@ func TestCancelRunningRequestReleasesResources(t *testing.T) {
 	cfg.Workers = 1
 	cfg.MaxBatchSize = 4
 	cfg.KVBlocksPerWorker = 1024
-	// A long-running request; cancel it mid-flight.
+	// A long-running request (fits in KV), cancelled mid-flight.
 	reqs := []*lifecycle.Request{
-		mkReq("run", "t0", 0, 0, lifecycle.PriorityNormal, 128, 100000),
+		mkReq("run", "t0", 0, 0, lifecycle.PriorityNormal, 128, 2000),
 	}
 	s := mustNew(t, cfg, reqs)
 	s.ScheduleCancel("run", 5_000_000) // 5ms in

@@ -13,6 +13,15 @@ func max(a, b int) int {
 	return b
 }
 
+// kvTokensOf returns the estimated KV token footprint of r: the explicit
+// KVTokens estimate if present, else prompt + expected output tokens.
+func kvTokensOf(r *lifecycle.Request) int {
+	if r.Estimate.KVTokens > 0 {
+		return r.Estimate.KVTokens
+	}
+	return r.Estimate.PrefillTokens + r.Estimate.ExpectedOutputTokens
+}
+
 // result returns a pointer to the result slot for request index idx.
 func (s *Simulator) result(idx int) *Result { return &s.results[idx] }
 

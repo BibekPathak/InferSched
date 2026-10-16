@@ -1,9 +1,16 @@
 /bin/
 *.test
 *.out
+
+# Benchmark artifacts.
+# The summary + plots + environment metadata are committed as evidence; the
+# bulky raw per-run JSON and generated traces are regenerable via `make bench`
+# and are intentionally ignored to keep the repository small.
+benchmarks/results/raw/
+benchmarks/results/traces/
 benchmarks/results/*.jsonl
 benchmarks/results/*.csv
-!benchmarks/results/.gitkeep
+
 crates/target/
 __pycache__/
 *.pyc

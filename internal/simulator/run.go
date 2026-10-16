@@ -118,6 +118,16 @@ func (s *Simulator) handleArrival(idx int) {
 	// marked outstanding in tryStart when a worker picks it up. This makes the
 	// controller's queue-length and queued-token bounds meaningful.
 	s.adm.Commit(r)
+
+	// A request whose estimated KV footprint exceeds the entire pool can never
+	// be scheduled. Reject it explicitly rather than letting it wait forever.
+	if blocks := s.res.Config().BlocksForTokens(kvTokensOf(r)); blocks > s.res.TotalKVBlocks() {
+		s.adm.Dequeue(r)
+		s.adm.MarkDone(r)
+		s.reject(idx, lifecycle.ReasonOverloadTokens)
+		return
+	}
+
 	s.result(idx).Admitted = true
 	s.result(idx).AdmitNS = s.now
 
@@ -200,10 +210,7 @@ func (s *Simulator) workerBusy(w *worker) bool {
 // prefill, and add it to the worker's active set. Returns true on success.
 func (s *Simulator) tryStart(w *worker, idx int) bool {
 	r := s.requests[idx]
-	kvTokens := r.Estimate.KVTokens
-	if kvTokens <= 0 {
-		kvTokens = r.Estimate.PrefillTokens + r.Estimate.ExpectedOutputTokens
-	}
+	kvTokens := kvTokensOf(r)
 	if _, err := s.res.Reserve(resources.Need{RequestID: r.ID, KVTokens: kvTokens}); err != nil {
 		return false
 	}
@@ -453,7 +460,10 @@ func (s *Simulator) finishTimes(res *Result) {
 	res.ArrivalNS = r.Arrival
 	res.DeadlineNS = r.Deadline
 	if res.Admitted {
-		res.QueueDelayNS = res.AdmitNS - res.ArrivalNS
+		res.AdmissionDelayNS = res.AdmitNS - res.ArrivalNS
+	}
+	if res.StartNS > 0 {
+		res.QueueDelayNS = res.StartNS - res.AdmitNS
 	}
 	if res.FirstTokenNS > 0 {
 		res.TTFTNS = res.FirstTokenNS - res.ArrivalNS

@@ -1,0 +1,9 @@
+services:
+  bench:
+    build: .
+    image: infersched:dev
+    volumes:
+      - ./benchmarks/results:/app/benchmarks/results
+    command: >
+      python3 benchmarks/scripts/run_benchmarks.py
+      --out benchmarks/results --seeds 1,2,3 --suite profiles,sweep,capacity

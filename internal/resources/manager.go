@@ -51,6 +51,12 @@ func New(cfg Config) *Manager {
 // Config returns the manager's configuration.
 func (m *Manager) Config() Config { return m.cfg }
 
+// TotalKVBlocks returns the pool-wide KV block capacity.
+func (m *Manager) TotalKVBlocks() int { return m.cfg.totalKVBlocks() }
+
+// TotalSlots returns the pool-wide execution slot capacity.
+func (m *Manager) TotalSlots() int { return m.cfg.totalSlots() }
+
 // Need describes the resources a request requires. Slots and Sequences are
 // usually both 1 per request; KVBlocks is derived from KVTokens.
 type Need struct {

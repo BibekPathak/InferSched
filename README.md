@@ -10,29 +10,30 @@ reproducible benchmark suite. It is **not** an API wrapper around a model server
 
 ## Status
 
-**Phase 4 complete.** Implemented:
+**Phase 5 complete.** Implemented:
 
 - Request model and an explicit, validated lifecycle state machine.
 - The `SchedulingPolicy` interface and five policies: FIFO, Priority, SJF,
   EDF, and the deadline-aware Hybrid — all sharing deterministic tie-breaking.
 - An optional aging mechanism for starvation protection.
-- A bounded admission controller (queue-length, queued-token, outstanding,
-  per-tenant limits) with immediate-reject and deadline-aware overload
-  strategies and distinct rejection reasons.
+- A bounded admission controller with immediate-reject and deadline-aware
+  overload strategies and distinct rejection reasons.
 - A concurrency-safe resource manager tracking execution slots, active
   sequences, and KV-cache blocks with atomic reservations and exactly-once
   release.
-- A deterministic discrete-event **continuous-batching simulator** modelling
-  prefill/decode, batching, KV-cache limits, cancellation, deadlines, and worker
-  failure, plus a narrow `ExecutionBackend` interface.
-- A versioned, reproducible JSONL workload-trace format.
-- Architecture, scheduling-policy, and benchmark-methodology documentation.
-- Unit, invariant, concurrency (race-tested), determinism, and integration tests.
+- A deterministic discrete-event continuous-batching simulator, plus a narrow
+  `ExecutionBackend` interface.
+- A reproducible Python workload generator (profiles A–G) and a benchmark
+  harness that replays identical traces across policies and seeds, saves raw
+  results, and emits Markdown tables and plots.
+- A performance report with measured simulation results and workload-specific
+  conclusions (`docs/performance-report.md`).
+- Architecture, scheduling-policy, benchmark-methodology, and performance
+  documentation, plus Docker for reproducible experiments.
 
 Not yet implemented (see [docs/architecture.md](docs/architecture.md) for the
-full phase map): the Python workload generator, the benchmark harness and
-report, the HTTP API, Prometheus metrics, the coordinator wiring, and the Rust
-core.
+full phase map): the HTTP API, Prometheus metrics, coordinator wiring, and the
+Rust core.
 
 ## Requirements
 
@@ -105,6 +106,17 @@ fifo           5      0      0      0      0 |     3.0     3.1     3.1 |     97.
 ...
 note: SIMULATION output, not real-hardware measurements
 ```
+
+Generate a workload, run the benchmark suite, and produce plots:
+
+```sh
+make gen-workloads        # profiles A-G at seed 1 under benchmarks/workloads/
+make bench                # full sweep across seeds + plots (SIMULATION output)
+```
+
+Results land in `benchmarks/results/` (`summary.md`, `summary.json`, `raw/`,
+`plots/`, `environment.json`). Conclusions are written up in
+[docs/performance-report.md](docs/performance-report.md).
 
 ## Repository layout
 

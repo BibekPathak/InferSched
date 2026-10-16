@@ -106,10 +106,11 @@ type Result struct {
 	FirstTokenNS int64 // 0 if never
 	EndNS        int64 // final transition time
 
-	QueueDelayNS int64 // AdmitNS - ArrivalNS
-	TTFTNS       int64 // FirstTokenNS - ArrivalNS
-	CompletionNS int64 // EndNS - ArrivalNS
-	LatenessNS   int64 // EndNS - DeadlineNS (positive = missed), if deadline
+	AdmissionDelayNS int64 // AdmitNS - ArrivalNS (time to admission)
+	QueueDelayNS     int64 // StartNS - AdmitNS (waiting for a worker slot)
+	TTFTNS           int64 // FirstTokenNS - ArrivalNS
+	CompletionNS     int64 // EndNS - ArrivalNS
+	LatenessNS       int64 // EndNS - DeadlineNS (positive = missed), if deadline
 
 	OutputTokens int
 	KVTokens     int

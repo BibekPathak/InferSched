@@ -232,6 +232,26 @@ func TestHorizonTerminates(t *testing.T) {
 	}
 }
 
+func TestRequestTooLargeToEverFitIsRejected(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Policy = "fifo"
+	cfg.Workers = 1
+	cfg.MaxBatchSize = 4
+	cfg.KVBlockSize = 16
+	cfg.KVBlocksPerWorker = 16 // 256 tokens total
+	// Needs 128+1024 = 1152 tokens = 72 blocks > 16 available, can never fit.
+	reqs := []*lifecycle.Request{
+		mkReq("huge", "t0", 0, 0, lifecycle.PriorityNormal, 128, 1024),
+	}
+	_, stats := mustNew(t, cfg, reqs).Run()
+	if stats.Rejected != 1 {
+		t.Fatalf("oversized request should be rejected, got %+v", stats)
+	}
+	if stats.Failed != 0 || stats.Completed != 0 {
+		t.Fatalf("oversized request should not fail/hang: %+v", stats)
+	}
+}
+
 func TestInvalidConfig(t *testing.T) {
 	if _, err := New(Config{Workers: 0}, nil); err == nil {
 		t.Fatal("expected error for zero workers")

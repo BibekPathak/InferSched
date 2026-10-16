@@ -1,0 +1,35 @@
+{
+  "scenarios": [
+    "A-short-interactive",
+    "B-long-context",
+    "C-mixed",
+    "D-bursty",
+    "E-deadline",
+    "F-overload-recovery",
+    "G-multitenant",
+    "sweep-C-low",
+    "sweep-C-moderate",
+    "sweep-C-saturation",
+    "sweep-C-overload",
+    "sweep-E-low",
+    "sweep-E-moderate",
+    "sweep-E-saturation",
+    "sweep-E-overload",
+    "cap-C-tiny-kv",
+    "cap-C-small-kv",
+    "cap-C-large-kv"
+  ],
+  "policies": [
+    "fifo",
+    "priority",
+    "sjf",
+    "edf",
+    "hybrid"
+  ],
+  "seeds": [
+    1,
+    2,
+    3
+  ],
+  "note": "SIMULATION output; see environment.json"
+}

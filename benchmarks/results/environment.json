@@ -1,0 +1,32 @@
+{
+  "os": "Linux-7.1.9-hardened1-1-hardened-x86_64-with-glibc2.44",
+  "machine": "x86_64",
+  "python": "3.12.7",
+  "cpu_count": 12,
+  "go_version": "go version go1.27.0-X:nodwarf5 linux/amd64",
+  "note": "All latency/throughput numbers are SIMULATION output.",
+  "numpy": "2.4.6",
+  "capacity": {
+    "workers": 2,
+    "batch_size": 8,
+    "kv_blocks_per_worker": 512,
+    "kv_block_size": 16,
+    "max_queue": 0,
+    "max_outstanding": 0,
+    "strategy": "reject",
+    "failure_rate": 0
+  },
+  "policies": [
+    "fifo",
+    "priority",
+    "sjf",
+    "edf",
+    "hybrid"
+  ],
+  "seeds": [
+    1,
+    2,
+    3
+  ],
+  "generated_at": "2026-10-16T18:03:16Z"
+}
