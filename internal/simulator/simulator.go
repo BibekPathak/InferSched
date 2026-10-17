@@ -20,6 +20,11 @@ type Config struct {
 	// Policy selects the scheduling policy by name (see scheduler.Registry).
 	Policy string
 
+	// PolicyBackend selects the policy implementation: "" or "go" uses the
+	// pure-Go core; "rust" uses the Rust scheduler-core (requires the rustcore
+	// build tag).
+	PolicyBackend scheduler.Backend
+
 	// Resource capacity.
 	Workers           int
 	MaxBatchSize      int
@@ -71,8 +76,8 @@ func (c Config) Validate() error {
 	if c.MaxBatchSize <= 0 {
 		return fmt.Errorf("simulator: max batch size must be > 0")
 	}
-	if _, ok := scheduler.Registry()[c.Policy]; !ok {
-		return fmt.Errorf("simulator: unknown policy %q", c.Policy)
+	if _, err := scheduler.ByBackend(c.Policy, c.PolicyBackend); err != nil {
+		return fmt.Errorf("simulator: %w", err)
 	}
 	if err := c.Perf.Validate(); err != nil {
 		return err
@@ -184,7 +189,10 @@ func New(cfg Config, reqs []*lifecycle.Request) (*Simulator, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	pol := scheduler.Registry()[cfg.Policy]
+	pol, err := scheduler.ByBackend(cfg.Policy, cfg.PolicyBackend)
+	if err != nil {
+		return nil, err
+	}
 	// Clone the caller's requests so repeated runs are independent and the
 	// caller's slice is never mutated. Two runs over the same inputs are
 	// therefore identical.
@@ -229,6 +237,8 @@ func (s *Simulator) wirePolicyClock() error {
 		p.NowFunc = now
 	case *scheduler.FIFO:
 		// no clock
+	case *scheduler.RustPolicy:
+		p.NowFunc = now
 	default:
 		return fmt.Errorf("simulator: unsupported policy type %T", s.policy)
 	}

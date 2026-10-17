@@ -18,6 +18,7 @@ import (
 	"github.com/BibekP/infersched/internal/admission"
 	"github.com/BibekP/infersched/internal/backend"
 	"github.com/BibekP/infersched/internal/lifecycle"
+	"github.com/BibekP/infersched/internal/scheduler"
 	"github.com/BibekP/infersched/internal/simulator"
 	"github.com/BibekP/infersched/internal/workload"
 )
@@ -38,6 +39,7 @@ func main() {
 		horizonMS = flag.Int64("horizon-ms", 0, "run horizon in milliseconds (0 = until drained)")
 		detail    = flag.Bool("detail", false, "print per-request results for each policy")
 		jsonOut   = flag.String("json-out", "", "write machine-readable results to this path (or '-' for stdout)")
+		backend   = flag.String("policy-backend", "go", "policy implementation: go|rust (rust requires -tags rustcore)")
 	)
 	flag.Parse()
 
@@ -62,6 +64,7 @@ func main() {
 			BatchSize: *batchSize, KVBlocks: *kvBlocks, KVBlockSize: *kvBlockSz,
 			MaxQueue: *maxQueue, MaxOutstanding: *maxOut, Strategy: *strategy,
 			FailRate: *failRate, HorizonNS: *horizonMS * 1_000_000,
+			PolicyBackend: *backend,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "sim: %v\n", err)
 			os.Exit(1)
@@ -83,6 +86,7 @@ func main() {
 		cfg := simulator.DefaultConfig()
 		cfg.Seed = *seed
 		cfg.Policy = name
+		cfg.PolicyBackend = scheduler.Backend(*backend)
 		cfg.Workers = *workers
 		cfg.MaxBatchSize = *batchSize
 		cfg.KVBlocksPerWorker = *kvBlocks
@@ -238,6 +242,7 @@ type simParams struct {
 	Strategy       string
 	FailRate       int
 	HorizonNS      int64
+	PolicyBackend  string
 }
 
 // jsonReport is the machine-readable benchmark record for one trace + config.
@@ -340,6 +345,7 @@ func runJSON(out string, tr *workload.Trace, base []*lifecycle.Request, p simPar
 		cfg := simulator.DefaultConfig()
 		cfg.Seed = p.Seed
 		cfg.Policy = name
+		cfg.PolicyBackend = scheduler.Backend(p.PolicyBackend)
 		cfg.Workers = p.Workers
 		cfg.MaxBatchSize = p.BatchSize
 		cfg.KVBlocksPerWorker = p.KVBlocks

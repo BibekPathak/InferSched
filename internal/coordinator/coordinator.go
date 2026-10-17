@@ -29,6 +29,11 @@ type Config struct {
 	// Policy is the scheduling policy name (see scheduler.Registry).
 	Policy string
 
+	// PolicyBackend selects the policy implementation: "" or "go" uses the
+	// pure-Go core; "rust" uses the Rust scheduler-core (requires the rustcore
+	// build tag).
+	PolicyBackend scheduler.Backend
+
 	// Resource capacity.
 	Resources resources.Config
 
@@ -114,9 +119,9 @@ func New(cfg Config) (*Coordinator, error) {
 	if cfg.Backend == nil {
 		return nil, fmt.Errorf("coordinator: backend is required")
 	}
-	pol, ok := scheduler.Registry()[cfg.Policy]
-	if !ok {
-		return nil, fmt.Errorf("coordinator: unknown policy %q", cfg.Policy)
+	pol, err := scheduler.ByBackend(cfg.Policy, cfg.PolicyBackend)
+	if err != nil {
+		return nil, fmt.Errorf("coordinator: %w", err)
 	}
 	base := time.Now()
 	res := resources.New(cfg.Resources)
@@ -155,6 +160,8 @@ func (c *Coordinator) wirePolicyClock() {
 	case *scheduler.EDF:
 		p.NowFunc = now
 	case *scheduler.Hybrid:
+		p.NowFunc = now
+	case *scheduler.RustPolicy:
 		p.NowFunc = now
 	}
 }

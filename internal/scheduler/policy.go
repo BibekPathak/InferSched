@@ -8,7 +8,11 @@
 // Reset before a new trace replay so runs are reproducible.
 package scheduler
 
-import "github.com/BibekP/infersched/internal/lifecycle"
+import (
+	"fmt"
+
+	"github.com/BibekP/infersched/internal/lifecycle"
+)
 
 // Policy orders requests for execution. Implementations must be safe to call
 // concurrently only if documented; the coordinator currently calls Order from a
@@ -36,5 +40,35 @@ func Registry() map[string]Policy {
 		"sjf":      NewSJF(DefaultCostModel()),
 		"edf":      NewEDF(DefaultCostModel()),
 		"hybrid":   NewHybrid(DefaultHybridWeights(), DefaultCostModel()),
+	}
+}
+
+// Backend selects which implementation provides a policy's ordering.
+type Backend string
+
+const (
+	// BackendGo uses the pure-Go implementation.
+	BackendGo Backend = "go"
+	// BackendRust uses the Rust scheduler-core over the C ABI. It is only
+	// available in binaries built with the `rustcore` build tag.
+	BackendRust Backend = "rust"
+)
+
+// ByBackend returns the policy named name implemented by the given backend.
+// When backend is BackendRust and the Rust core is not linked, it returns an
+// error so the caller can fail fast rather than silently using a different
+// implementation.
+func ByBackend(name string, backend Backend) (Policy, error) {
+	switch backend {
+	case "", BackendGo:
+		p, ok := Registry()[name]
+		if !ok {
+			return nil, fmt.Errorf("scheduler: unknown policy %q", name)
+		}
+		return p, nil
+	case BackendRust:
+		return NewRustPolicy(name)
+	default:
+		return nil, fmt.Errorf("scheduler: unknown backend %q", backend)
 	}
 }

@@ -4,12 +4,30 @@ PYTHON   ?= python3
 PKG      := github.com/BibekP/infersched
 BIN      := bin/infersched
 
-.PHONY: all build test test-race vet fmt lint clean run serve sim bench bench-quick plots gen-workloads help
+.PHONY: all build build-rust test test-race vet fmt lint clean run serve sim bench bench-quick plots gen-workloads rust-core rust-test rust-equivalence help
 
 all: fmt vet test build
 
 build:
 	$(GO) build -o $(BIN) ./cmd/infersched
+
+# Build the coordinator with the Rust scheduling core linked in (requires a Rust
+# toolchain). The default `build` target does not need Rust.
+build-rust:
+	$(CARGO) build --manifest-path crates/scheduler-core/Cargo.toml --release
+	CGO_ENABLED=1 $(GO) build -tags rustcore -o $(BIN) ./cmd/infersched
+
+# Run the Rust scheduler-core unit tests.
+rust-test:
+	$(CARGO) test --manifest-path crates/scheduler-core/Cargo.toml
+
+# Build only the Rust static library.
+rust-core:
+	$(CARGO) build --manifest-path crates/scheduler-core/Cargo.toml --release
+
+# Run the Go <-> Rust equivalence tests.
+rust-equivalence: rust-core
+	CGO_ENABLED=1 $(GO) test -tags rustcore ./internal/scheduler/ -run TestRust -v
 
 test:
 	$(GO) test ./...
@@ -58,6 +76,7 @@ gen-workloads:
 
 clean:
 	rm -rf bin
+	$(CARGO) clean --manifest-path crates/scheduler-core/Cargo.toml 2>/dev/null || true
 
 help:
 	@echo "make build       - build the coordinator binary"
@@ -70,3 +89,6 @@ help:
 	@echo "make bench       - full benchmark suite + plots (SIMULATION output)"
 	@echo "make bench-quick - quick single-seed benchmark"
 	@echo "make gen-workloads - generate profiles A-G at seed 1"
+	@echo "make rust-test   - run the Rust scheduler-core unit tests"
+	@echo "make build-rust  - build the coordinator with the Rust core linked"
+	@echo "make rust-equivalence - Go vs Rust ordering equivalence tests"

@@ -1,0 +1,17 @@
+[package]
+name = "scheduler-core"
+version = "0.1.0"
+edition = "2021"
+description = "InferSched scheduling core: deterministic request ordering policies"
+license = "MIT"
+
+[lib]
+name = "scheduler_core"
+# Static library with a C ABI, linked into the Go coordinator via cgo.
+crate-type = ["staticlib"]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true

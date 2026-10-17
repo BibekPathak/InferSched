@@ -21,7 +21,7 @@ can tell what is implemented from what is planned.
 | 8 | Metrics + tracing | `internal/observability` | **6** |
 | 9 | Workload generator + benchmark harness | `benchmarks/`, `internal/workload` | 1 (format), **5** (generator) |
 | — | Coordinator wiring | `internal/coordinator` | **6** |
-| — | Rust scheduling core | `crates/scheduler-core` | 7 (optional) |
+| — | Rust scheduling core | `crates/scheduler-core` | **7** (optional) |
 
 ## Data flow (target)
 
@@ -192,6 +192,75 @@ Structured JSON logs record the request lifecycle (`request.submitted`,
 `request.admitted`, `request.started`, `request.terminal`, ...) with the request
 ID as a field.
 
+## Cross-language boundary (Phase 7)
+
+The scheduling core exists in two implementations behind the same
+`scheduler.Policy` interface:
+
+- **Go** (`internal/scheduler`) — the default, always built.
+- **Rust** (`crates/scheduler-core`) — the same policies, linked in a binary
+  built with the `rustcore` build tag.
+
+### Why a second implementation
+
+The Rust core demonstrates a narrow, low-risk cross-language seam with
+ownership-friendly sorting. It is **optional**: the project builds, tests, and
+benchmarks fully without a Rust toolchain. Nothing in the coordinator, simulator,
+or benchmark harness depends on it.
+
+### The ABI
+
+The boundary is deliberately minimal and allocation-free:
+
+```c
+typedef struct { uint32 index; int64 arrival_ns; int64 deadline_ns; int32 priority;
+                 double prefill_cost_ms; double decode_cost_per_token_ms;
+                 int64 expected_output_tokens; int64 kv_tokens; } infersched_request_view;
+
+int32_t infersched_order(uint32_t policy_kind, const infersched_hybrid_weights *w,
+                         int64_t now_ns, const infersched_request_view *reqs,
+                         size_t n, uint32_t *out);
+```
+
+- The caller passes a flat array of request **metadata** and receives a
+  permutation of input **positions**. No Rust types, allocators, or error values
+  cross the boundary.
+- `Go → C`: the adapter (`internal/scheduler/rustcore.go`, `//go:build rustcore`)
+  marshals metadata into a C array and calls `infersched_order` once per
+  `Order`.
+- `C → Rust`: `unsafe extern "C" fn infersched_order` reconstructs slices and
+  sorts stable indices with the same comparator as Go.
+- The C header (`crates/scheduler-core/include/scheduler_core.h`) and the Rust
+  `#[repr(C)]` structs are the single source of truth for layout; field order
+  must match exactly.
+
+### Determinism and equivalence
+
+Both implementations break ties identically (arrival, then a stable position
+that mirrors the Go ID order). The build-tagged test
+`TestRustGoEquivalence` runs randomized request sets through every policy on
+both implementations and asserts byte-identical orderings; it passes for all
+five policies over hundreds of sets. A full trace replay through the simulator
+with `-policy-backend go` and `-policy-backend rust` produces identical
+statistics.
+
+### Building
+
+```sh
+make rust-test           # cargo test in crates/scheduler-core
+make build-rust          # build the coordinator with -tags rustcore
+make rust-equivalence    # Go vs Rust ordering equivalence tests
+```
+
+### Limits
+
+- Only request **ordering** is delegated; resource accounting, admission, and
+  the event loop remain in Go.
+- The Rust policy is stateless per call (no aging counters of its own); aging
+  terms are computed from the reference time passed in.
+- The `.a` is linked statically; there is no dynamic-library or versioned-symbol
+  scheme.
+
 ## Request lifecycle (component 3)
 
 A request is created in `QUEUED` and moves through an explicit, tabulated state
@@ -260,14 +329,6 @@ format lives in `internal/workload` and is validated on load; a mismatched
 are files, the *same* arrivals are replayed against every policy, in any language
 or process, guaranteeing identical input.
 
-## Cross-language boundary
-
-The scheduling core is written in Go for Phases 1–6. Phase 7 adds a Rust
-`scheduler-core` crate behind the same `Policy` interface, bridged through a
-narrow C ABI (`c-archive` + cgo adapter). The interface is deliberately small —
-ordering in, ordering out — so the FFI does not leak into the coordinator, the
-simulator, or the benchmark harness.
-
 ## Correctness posture
 
 - State transitions are the single choke point for lifecycle changes.
@@ -275,11 +336,13 @@ simulator, or the benchmark harness.
 - Monotonic time everywhere internally.
 - Determinism is a testable property: same seed + same trace ⇒ identical output.
 
-## Limitations (through Phase 6)
+## Limitations (through Phase 7)
 
 - The default `-serve` execution backend is a mock; the simulator backend is
   available through `ExecutionBackend` but has not yet been wired as the default
-  server backend. No real inference engine is integrated (Phase 7, optional).
+  server backend. No real inference engine is integrated.
+- The Rust core is optional and implements ordering only; it is not on the
+  default build path and does not accelerate anything by itself.
 - All cost figures are model parameters; no real backend has been measured.
 - Metrics are dependency-free rather than using `client_golang`; the exposition
   format is standard, but histograms/summaries are not implemented.

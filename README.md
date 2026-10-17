@@ -10,7 +10,7 @@ reproducible benchmark suite. It is **not** an API wrapper around a model server
 
 ## Status
 
-**Phase 6 complete.** Implemented:
+**Phase 7 complete.** Implemented:
 
 - Request model and an explicit, validated lifecycle state machine.
 - The `SchedulingPolicy` interface and five policies: FIFO, Priority, SJF,
@@ -23,16 +23,18 @@ reproducible benchmark suite. It is **not** an API wrapper around a model server
   release.
 - A deterministic discrete-event continuous-batching simulator, plus a narrow
   `ExecutionBackend` interface with mock and simulator adapters.
-- A **runtime coordinator** that wires ingress → admission → policy → resources
-  → backend on a single scheduling goroutine, with graceful shutdown.
-- An **HTTP API**: submit, query state, cancel, scheduler status, resource usage,
-  and Prometheus `/metrics` — with bounded labels and structured logs.
+- A runtime coordinator (ingress → admission → policy → resources → backend)
+  with graceful shutdown.
+- An HTTP API (submit, query, cancel, scheduler status, resources) and
+  Prometheus `/metrics` with bounded labels and structured logs.
 - A reproducible Python workload generator and benchmark harness, and a
   performance report with measured simulation results.
+- An **optional Rust scheduling core** behind the same `Policy` interface via a
+  narrow C ABI, with Go↔Rust equivalence tests.
 - Docker for reproducible experiments.
 
-Not yet implemented (see [docs/architecture.md](docs/architecture.md) for the
-full phase map): the optional Rust scheduling core and a real inference backend.
+The remaining optional work is a real inference backend (vLLM/llama.cpp), which
+requires GPU hardware and is not part of the default deliverable.
 
 ## Requirements
 
@@ -141,6 +143,24 @@ make bench                # full sweep across seeds + plots (SIMULATION output)
 Results land in `benchmarks/results/` (`summary.md`, `summary.json`, `raw/`,
 `plots/`, `environment.json`). Conclusions are written up in
 [docs/performance-report.md](docs/performance-report.md).
+
+### Optional Rust scheduling core
+
+The scheduling policies also exist in Rust behind the same interface, linked
+through a narrow C ABI. The default build does **not** require a Rust toolchain.
+
+```sh
+make rust-test          # cargo unit tests for the core
+make rust-equivalence   # Go vs Rust ordering equivalence tests
+make build-rust         # build the coordinator with -tags rustcore
+
+# replay a trace using the Rust policy backend
+go run -tags rustcore ./simulator/cmd/sim \
+  -trace benchmarks/workloads/sample-short-interactive.jsonl -policy-backend rust
+```
+
+See the cross-language boundary section in
+[docs/architecture.md](docs/architecture.md).
 
 ## Repository layout
 

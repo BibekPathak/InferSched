@@ -74,11 +74,17 @@ func (c *Coordinator) finalizeShutdown() {
 		st := rec.req.State()
 		switch st {
 		case lifecycle.StateQueued:
+			if !c.recordOutcome(rec, backend.OutcomeFailed, lifecycle.ReasonShutdown) {
+				continue
+			}
 			c.adm.Dequeue(rec.req)
 			c.adm.MarkDone(rec.req)
 			rec.req.Reject()
 			c.finish(rec, backend.OutcomeFailed, lifecycle.ReasonShutdown)
 		case lifecycle.StateRunning:
+			if !c.recordOutcome(rec, backend.OutcomeCancelled, lifecycle.ReasonShutdown) {
+				continue
+			}
 			rec.req.Cancel()
 			c.finish(rec, backend.OutcomeCancelled, lifecycle.ReasonShutdown)
 		}
@@ -129,11 +135,10 @@ func (c *Coordinator) admitIncoming() {
 			continue
 		}
 		c.adm.Commit(rec.req)
+		c.mu.Lock()
 		rec.admitted = true
 		rec.admitNS = c.clock()
 		rec.reason = lifecycle.ReasonNone
-
-		c.mu.Lock()
 		c.stats.admitted++
 		c.order = append(c.order, rec)
 		c.mu.Unlock()
@@ -166,7 +171,7 @@ func (c *Coordinator) schedule() {
 	started := make(map[string]bool)
 	for _, req := range ordered {
 		rec := c.recordFor(req.ID)
-		if rec == nil || rec.started {
+		if rec == nil || c.recordStarted(rec) {
 			continue
 		}
 		if _, err := c.res.Reserve(resources.Need{RequestID: rec.req.ID, KVTokens: rec.kvTokens}); err != nil {
@@ -182,13 +187,16 @@ func (c *Coordinator) schedule() {
 			continue
 		}
 		if _, err := c.cfg.Backend.Submit(rec.req); err != nil {
+			c.recordOutcome(rec, backend.OutcomeFailed, lifecycle.ReasonWorkerFailure)
 			rec.req.Fail()
 			c.res.Release(rec.req.ID)
 			c.finish(rec, backend.OutcomeFailed, lifecycle.ReasonWorkerFailure)
 			continue
 		}
+		c.mu.Lock()
 		rec.started = true
 		rec.startNS = c.clock()
+		c.mu.Unlock()
 		started[rec.req.ID] = true
 		c.adm.Dequeue(rec.req)
 		c.adm.MarkOutstanding()
@@ -212,6 +220,11 @@ func (c *Coordinator) schedule() {
 }
 
 // applyResult applies a backend result, releasing resources exactly once.
+//
+// The record's terminal outcome is recorded under the coordinator lock BEFORE
+// the request's own state transition, so a concurrent RequestStatus can never
+// observe a terminal request state with an empty outcome. finish() then
+// performs the exactly-once resource release and metric updates.
 func (c *Coordinator) applyResult(res backend.Result) {
 	rec := c.recordFor(res.RequestID)
 	if rec == nil {
@@ -219,9 +232,11 @@ func (c *Coordinator) applyResult(res backend.Result) {
 	}
 	switch res.Outcome {
 	case backend.OutcomeCompleted:
+		if !c.recordOutcome(rec, backend.OutcomeCompleted, lifecycle.ReasonCompleted) {
+			return
+		}
 		if err := rec.req.Complete(); err != nil {
 			c.log.Warn("complete_transition_failed", "id", rec.req.ID, "err", err.Error())
-			return
 		}
 		c.finish(rec, backend.OutcomeCompleted, lifecycle.ReasonCompleted)
 		if rec.req.HasDeadline() && c.clock() > rec.req.Deadline {
@@ -231,15 +246,38 @@ func (c *Coordinator) applyResult(res backend.Result) {
 			c.met.IncCounter(observability.MetricDeadlineMisses, nil)
 		}
 	case backend.OutcomeCancelled:
+		if !c.recordOutcome(rec, backend.OutcomeCancelled, lifecycle.ReasonClientCancel) {
+			return
+		}
 		rec.req.Cancel()
 		c.finish(rec, backend.OutcomeCancelled, lifecycle.ReasonClientCancel)
 	case backend.OutcomeFailed:
+		if !c.recordOutcome(rec, backend.OutcomeFailed, lifecycle.ReasonWorkerFailure) {
+			return
+		}
 		rec.req.Fail()
 		c.finish(rec, backend.OutcomeFailed, lifecycle.ReasonWorkerFailure)
 	case backend.OutcomeExpired:
+		if !c.recordOutcome(rec, backend.OutcomeExpired, lifecycle.ReasonTimeout) {
+			return
+		}
 		rec.req.Expire()
 		c.finish(rec, backend.OutcomeExpired, lifecycle.ReasonTimeout)
 	}
+}
+
+// recordOutcome records the terminal outcome on a record under the lock. It
+// returns false if the record was already terminal (the caller must not
+// transition or release again).
+func (c *Coordinator) recordOutcome(rec *record, outcome backend.Outcome, reason lifecycle.Reason) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if rec.outcome != "" {
+		return false
+	}
+	rec.outcome = outcome
+	rec.reason = reason
+	return true
 }
 
 // expireDeadlines expires admitted-but-not-started or running requests whose
@@ -260,6 +298,9 @@ func (c *Coordinator) expireDeadlines() {
 	c.mu.Unlock()
 
 	for _, rec := range expiredQueued {
+		if !c.recordOutcome(rec, backend.OutcomeExpired, lifecycle.ReasonTimeout) {
+			continue
+		}
 		c.adm.Dequeue(rec.req)
 		c.adm.MarkDone(rec.req)
 		rec.req.Expire()
@@ -283,6 +324,9 @@ func (c *Coordinator) expireDeadlines() {
 
 // reject records a rejection and updates metrics.
 func (c *Coordinator) reject(rec *record, reason lifecycle.Reason) {
+	if !c.recordOutcome(rec, backend.OutcomeFailed, reason) {
+		return
+	}
 	rec.req.Reject()
 	c.finish(rec, backend.OutcomeFailed, reason)
 	c.mu.Lock()
@@ -292,29 +336,34 @@ func (c *Coordinator) reject(rec *record, reason lifecycle.Reason) {
 	c.log.Info(string(observability.EventRejected), "id", rec.req.ID, "reason", string(reason))
 }
 
-// finish releases resources (exactly once) and records the terminal outcome.
+// finish performs the exactly-once resource release and metric updates for a
+// record whose terminal outcome has already been recorded (by recordOutcome or
+// reject). It is idempotent: repeated calls release at most once.
 func (c *Coordinator) finish(rec *record, outcome backend.Outcome, reason lifecycle.Reason) {
 	c.mu.Lock()
-	if rec.outcome != "" {
-		c.mu.Unlock()
-		return
+	if rec.outcome == "" {
+		// Defensive: callers normally record the outcome first.
+		rec.outcome = outcome
+		rec.reason = reason
 	}
-	rec.outcome = outcome
-	rec.reason = reason
-	rec.endNS = c.clock()
+	if rec.endNS == 0 {
+		rec.endNS = c.clock()
+	}
 	started := rec.started
-	released := rec.released
+	alreadyReleased := rec.released
 	rec.released = true
 	c.mu.Unlock()
 
-	if started && !released {
+	if alreadyReleased {
+		return
+	}
+	if started {
 		if _, err := c.res.Release(rec.req.ID); err != nil {
 			c.log.Warn("release_failed", "id", rec.req.ID, "err", err.Error())
 		}
 		c.adm.MarkDone(rec.req)
 	}
 
-	outcomeLabel := string(outcome)
 	switch outcome {
 	case backend.OutcomeCompleted:
 		c.met.IncCounter(observability.MetricRequestsCompleted, map[string]string{"outcome": "completed"})
@@ -323,13 +372,11 @@ func (c *Coordinator) finish(rec *record, outcome backend.Outcome, reason lifecy
 	case backend.OutcomeExpired:
 		c.met.IncCounter(observability.MetricRequestsCompleted, map[string]string{"outcome": "expired"})
 	case backend.OutcomeFailed:
-		if isRejection(reason) {
-			// counted via reject()
-		} else {
+		if !isRejection(reason) {
 			c.met.IncCounter(observability.MetricRequestsCompleted, map[string]string{"outcome": "failed"})
 		}
 	}
-	c.log.Info("request.terminal", "id", rec.req.ID, "outcome", outcomeLabel, "reason", string(reason))
+	c.log.Info("request.terminal", "id", rec.req.ID, "outcome", string(outcome), "reason", string(reason))
 }
 
 // recordFor returns the record for id, or nil.
@@ -337,6 +384,13 @@ func (c *Coordinator) recordFor(id string) *record {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.records[id]
+}
+
+// recordStarted reports whether a record has been started, under the lock.
+func (c *Coordinator) recordStarted(rec *record) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return rec.started
 }
 
 // publishResourceGauges updates the resource gauges.
