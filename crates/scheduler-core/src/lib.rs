@@ -77,13 +77,7 @@ impl PolicyKind {
 }
 
 fn clamp01(x: f64) -> f64 {
-    if x < 0.0 {
-        0.0
-    } else if x > 1.0 {
-        1.0
-    } else {
-        x
-    }
+    x.clamp(0.0, 1.0)
 }
 
 /// Universal deterministic tie-break: earlier arrival, then smaller index.
@@ -308,7 +302,7 @@ pub extern "C" fn infersched_default_hybrid_weights() -> HybridWeightsFfi {
 /// Return the scheduler-core version as a static C string.
 #[no_mangle]
 pub extern "C" fn infersched_core_version() -> *const std::os::raw::c_char {
-    b"0.1.0\0".as_ptr() as *const std::os::raw::c_char
+    c"0.1.0".as_ptr()
 }
 
 #[cfg(test)]
@@ -373,10 +367,7 @@ mod tests {
 
     #[test]
     fn sjf_shortest_first() {
-        let reqs = vec![
-            rv(0, 1, 0, 0, 100.0, 1000),
-            rv(1, 2, 0, 0, 1.0, 10),
-        ];
+        let reqs = vec![rv(0, 1, 0, 0, 100.0, 1000), rv(1, 2, 0, 0, 1.0, 10)];
         assert_eq!(order(PolicyKind::Sjf, &reqs), vec![1, 0]);
     }
 

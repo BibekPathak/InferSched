@@ -10,7 +10,7 @@ reproducible benchmark suite. It is **not** an API wrapper around a model server
 
 ## Status
 
-**Phase 7 complete.** Implemented:
+**Phase 8 complete — portfolio-ready.** Implemented:
 
 - Request model and an explicit, validated lifecycle state machine.
 - The `SchedulingPolicy` interface and five policies: FIFO, Priority, SJF,
@@ -34,7 +34,9 @@ reproducible benchmark suite. It is **not** an API wrapper around a model server
 - Docker for reproducible experiments.
 
 The remaining optional work is a real inference backend (vLLM/llama.cpp), which
-requires GPU hardware and is not part of the default deliverable.
+requires GPU hardware and is explicitly out of scope for the default
+deliverable. See the [Definition of done](#definition-of-done) for the
+criterion-by-criterion status.
 
 ## Requirements
 
@@ -170,29 +172,55 @@ internal/lifecycle/    request model + state machine            (Phase 1)
 internal/scheduler/    SchedulingPolicy interface + policies      (Phase 1-2)
 internal/workload/     versioned JSONL trace format             (Phase 1)
 internal/admission/    bounded admission control                (Phase 3)
-internal/resources/    compute + KV-cache accounting            (Phase 3)internal/backend/      execution backend interface              (Phase 4)
+internal/resources/    compute + KV-cache accounting            (Phase 3)
+internal/backend/      execution backend interface              (Phase 4)
 internal/api/          HTTP ingress                             (Phase 6)
 internal/coordinator/  runtime wiring + lifecycle               (Phase 6)
 internal/observability/ Prometheus metrics + logs               (Phase 6)
 internal/simulator/    discrete-event continuous batching        (Phase 4)
-simulator/cmd/sim/     simulator replay CLI                     (Phase 4)
-benchmarks/            workload traces, scripts, results        (Phase 5)
+simulator/cmd/sim/     simulator replay / benchmark CLI          (Phase 4-5)
+benchmarks/scripts/    workload generator + benchmark harness   (Phase 5)
+benchmarks/workloads/  generated JSONL traces                   (Phase 5)
+benchmarks/results/    summary, plots, environment              (Phase 5)
 crates/scheduler-core/ Rust scheduling core (C ABI)             (Phase 7)
-docs/                  architecture, policies, methodology
+docs/                  architecture, policies, methodology, perf report
 ```
+
+## Verification
+
+```sh
+make fmt vet test-race        # formatting, vet, and Go tests under the race detector
+make build-rust rust-test     # optional Rust core: build + cargo tests
+make rust-equivalence         # Go <-> Rust ordering equivalence tests
+make bench                    # full benchmark sweep + plots (SIMULATION output)
+```
+
+## Definition of done
+
+| # | Criterion | Status |
+|---|---|---|
+| 1 | Multiple policies behind one scheduler interface | ✅ FIFO, Priority, SJF, EDF, Hybrid (+ aging) |
+| 2 | Reproducible workload generator | ✅ profiles A–G, seeded, JSONL |
+| 3 | Simulator models batching, prefill, decode, KV limits | ✅ `internal/simulator` |
+| 4 | Bounded admission, explicit overload rejection | ✅ `internal/admission` |
+| 5 | Cancellation + resource accounting pass concurrency tests | ✅ race-tested |
+| 6 | Benchmark suite compares all policies on identical traces | ✅ `benchmarks/` |
+| 7 | Performance report with measured trade-offs | ✅ `docs/performance-report.md` |
+| 8 | API lifecycle ops and metrics work | ✅ `internal/api` + `/metrics` |
+| 9 | Docs explain design and simulation limits | ✅ `docs/` |
+| 10 | Build & test via documented commands | ✅ `make` targets |
 
 ## Limitations and honesty
 
-- All latency, throughput, and memory figures will come from a **simulator**
-  unless an actual inference backend is integrated and measured. Simulation
-  results are labelled distinctly and are never presented as real hardware
-  measurements.
+- All latency, throughput, and memory figures come from a **simulator**, never
+  from real hardware. Simulation results are labelled distinctly and are never
+  presented as hardware measurements.
 - Output lengths are **predictions**. The cost model is configurable and its
   error is an experimental variable.
 - Deadlines are not guaranteed under overload. Admission control may reject or
   defer requests that cannot finish in time, and rejection reasons are recorded.
 - No claim of GPU scheduling or real KV-cache utilization is made while only a
   CPU-side simulation exists.
-
-See [docs/architecture.md](docs/architecture.md) and
-[docs/scheduling-policies.md](docs/scheduling-policies.md).
+- The Rust scheduling core is optional and implements ordering only; it is
+  verified equivalent to Go but is not faster in an unconditional sense (see
+  `docs/architecture.md`).

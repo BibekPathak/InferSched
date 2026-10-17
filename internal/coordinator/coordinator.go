@@ -43,10 +43,6 @@ type Config struct {
 	// DefaultTenant is applied when a submission omits a tenant.
 	DefaultTenant string
 
-	// MaxPending bounds the internal admitted-queue slice. Requests beyond this
-	// are rejected with a queue-length reason. 0 = bounded by admission only.
-	MaxPending int
-
 	// Backend is the execution backend. Required.
 	Backend backend.ExecutionBackend
 
@@ -60,10 +56,7 @@ type Config struct {
 // record tracks a request through the coordinator.
 type record struct {
 	req       *lifecycle.Request
-	ctx       context.Context
-	cancel    context.CancelFunc
 	arrivalNS int64
-	submitNS  int64
 	admitNS   int64
 	startNS   int64
 	endNS     int64
@@ -91,8 +84,12 @@ type Coordinator struct {
 	records  map[string]*record
 	order    []*record // admitted, not yet started, in arrival order
 	incoming []*record // submitted, not yet evaluated for admission
-	closed   bool
-	wakeup   chan struct{}
+	// cancelIntent records request IDs the API has asked to cancel. Queued
+	// requests are cancelled by the run loop when it observes the intent;
+	// running requests are cancelled via the backend.
+	cancelIntent map[string]bool
+	closed       bool
+	wakeup       chan struct{}
 
 	backendResults <-chan backend.Result
 
@@ -126,15 +123,16 @@ func New(cfg Config) (*Coordinator, error) {
 	base := time.Now()
 	res := resources.New(cfg.Resources)
 	c := &Coordinator{
-		cfg:      cfg,
-		log:      cfg.Logger,
-		met:      cfg.Metrics,
-		pol:      pol,
-		res:      res,
-		records:  make(map[string]*record),
-		wakeup:   make(chan struct{}, 1),
-		done:     make(chan struct{}),
-		baseTime: base,
+		cfg:          cfg,
+		log:          cfg.Logger,
+		met:          cfg.Metrics,
+		pol:          pol,
+		res:          res,
+		records:      make(map[string]*record),
+		cancelIntent: make(map[string]bool),
+		wakeup:       make(chan struct{}, 1),
+		done:         make(chan struct{}),
+		baseTime:     base,
 	}
 	if c.log == nil {
 		c.log = observability.NewLogger(nil, slog.LevelInfo)
@@ -193,13 +191,10 @@ func (c *Coordinator) SubmitRequest(spec Submission) (string, error) {
 		return "", fmt.Errorf("coordinator: duplicate request id %q", req.ID)
 	}
 	rec := &record{
-		req:      req,
-		ctx:      req.Ctx,
-		cancel:   func() {},
-		submitNS: c.clock(),
-		kvTokens: kvTokensOf(req),
+		req:       req,
+		kvTokens:  kvTokensOf(req),
+		arrivalNS: req.Arrival,
 	}
-	rec.arrivalNS = req.Arrival
 	c.records[req.ID] = rec
 	c.incoming = append(c.incoming, rec)
 	c.stats.submitted++
@@ -233,24 +228,29 @@ func (c *Coordinator) CancelRequest(id string) error {
 		return fmt.Errorf("coordinator: request %q already terminal (%s)", id, rec.req.State())
 	}
 	c.mu.Unlock()
-	// The run loop performs the actual transition, releasing resources once.
+	// Record the intent and, if the request is already running, ask the backend
+	// to stop it. The run loop performs the actual transition and releases
+	// resources exactly once, for both queued and running requests.
 	c.cancelRequest(id)
 	c.signal()
 	return nil
 }
 
-// cancelRequest marks a request for cancellation and, if running, tells the
-// backend. Idempotent.
+// cancelRequest records cancellation intent and, if the request is running,
+// asks the backend to cancel. Idempotent.
 func (c *Coordinator) cancelRequest(id string) {
 	c.mu.Lock()
 	rec, ok := c.records[id]
-	if !ok || rec.req.State().Terminal() {
+	if !ok {
 		c.mu.Unlock()
 		return
 	}
-	h := backend.Handle{RequestID: id}
+	c.cancelIntent[id] = true
+	started := rec.started
 	c.mu.Unlock()
-	_ = c.cfg.Backend.Cancel(h)
+	if started {
+		_ = c.cfg.Backend.Cancel(backend.Handle{RequestID: id})
+	}
 }
 
 // RequestStatus returns a snapshot of a request's status.

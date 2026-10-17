@@ -248,3 +248,55 @@ func TestCoordinatorConcurrentSubmit(t *testing.T) {
 		t.Fatalf("resources leaked after concurrent load: %+v", snap)
 	}
 }
+
+func TestCoordinatorCancelQueued(t *testing.T) {
+	// One worker, batch size 1: the second request stays queued behind the
+	// first (which runs for an hour). Cancelling the queued request must move it
+	// to CANCELLED without a worker ever running it, and must not leak queue
+	// accounting.
+	cfg := testConfig(backend.NewMockBackend(time.Hour, nil))
+	cfg.Resources.MaxBatchSize = 1
+	cfg.Admission.MaxOutstanding = 100
+	c, _ := New(cfg)
+	c.Start()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = c.Shutdown(ctx)
+	}()
+
+	id1, err := c.SubmitRequest(Submission{ID: "running", PromptTokens: 64, ExpectedOutputTokens: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForState(t, c, id1, string(lifecycle.StateRunning), 2*time.Second)
+
+	id2, err := c.SubmitRequest(Submission{ID: "queued", PromptTokens: 64, ExpectedOutputTokens: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		st, _ := c.RequestStatus(id2)
+		if st.State == string(lifecycle.StateQueued) && st.AdmitNS > 0 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if err := c.CancelRequest(id2); err != nil {
+		t.Fatalf("cancel queued: %v", err)
+	}
+	waitForState(t, c, id2, string(lifecycle.StateCancelled), 2*time.Second)
+
+	st, _ := c.RequestStatus(id2)
+	if st.Outcome != string(backend.OutcomeCancelled) {
+		t.Fatalf("outcome=%s want cancelled", st.Outcome)
+	}
+	if st.Reason != string(lifecycle.ReasonClientCancel) {
+		t.Fatalf("reason=%s want client cancel", st.Reason)
+	}
+	if err := c.adm.Invariants(); err != nil {
+		t.Fatalf("admission invariants after queued cancel: %v", err)
+	}
+}

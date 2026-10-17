@@ -11,7 +11,7 @@ benchmarks/results/traces/
 benchmarks/results/*.jsonl
 benchmarks/results/*.csv
 
-crates/target/
+crates/**/target/
 __pycache__/
 *.pyc
 .venv/

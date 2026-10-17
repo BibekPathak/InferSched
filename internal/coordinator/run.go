@@ -22,6 +22,7 @@ func (c *Coordinator) run() {
 	defer ticker.Stop()
 
 	for {
+		c.processCancellations()
 		c.drainBackendResults()
 		c.expireDeadlines()
 		c.admitIncoming()
@@ -43,6 +44,53 @@ func (c *Coordinator) run() {
 			c.applyResult(res)
 		case <-ticker.C:
 		}
+	}
+}
+
+// processCancellations cancels queued (not-yet-started) requests that the API
+// has asked to cancel. Running requests are cancelled via the backend and are
+// finalized when their result arrives. This closes the gap where a request
+// cancelled while queued would otherwise keep waiting for a worker slot.
+func (c *Coordinator) processCancellations() {
+	c.mu.Lock()
+	if len(c.cancelIntent) == 0 {
+		c.mu.Unlock()
+		return
+	}
+	var toCancel []*record
+	kept := c.order[:0]
+	for _, rec := range c.order {
+		if c.cancelIntent[rec.req.ID] && !rec.started {
+			toCancel = append(toCancel, rec)
+			continue
+		}
+		kept = append(kept, rec)
+	}
+	c.order = kept
+	incomingKept := c.incoming[:0]
+	for _, rec := range c.incoming {
+		if c.cancelIntent[rec.req.ID] {
+			toCancel = append(toCancel, rec)
+			continue
+		}
+		incomingKept = append(incomingKept, rec)
+	}
+	c.incoming = incomingKept
+	for _, rec := range toCancel {
+		delete(c.cancelIntent, rec.req.ID)
+	}
+	c.mu.Unlock()
+
+	for _, rec := range toCancel {
+		if !c.recordOutcome(rec, backend.OutcomeCancelled, lifecycle.ReasonClientCancel) {
+			continue
+		}
+		if rec.admitted {
+			c.adm.Dequeue(rec.req)
+			c.adm.MarkDone(rec.req)
+		}
+		rec.req.Cancel()
+		c.finish(rec, backend.OutcomeCancelled, lifecycle.ReasonClientCancel)
 	}
 }
 
