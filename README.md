@@ -10,7 +10,7 @@ reproducible benchmark suite. It is **not** an API wrapper around a model server
 
 ## Status
 
-**Phase 5 complete.** Implemented:
+**Phase 6 complete.** Implemented:
 
 - Request model and an explicit, validated lifecycle state machine.
 - The `SchedulingPolicy` interface and five policies: FIFO, Priority, SJF,
@@ -22,18 +22,17 @@ reproducible benchmark suite. It is **not** an API wrapper around a model server
   sequences, and KV-cache blocks with atomic reservations and exactly-once
   release.
 - A deterministic discrete-event continuous-batching simulator, plus a narrow
-  `ExecutionBackend` interface.
-- A reproducible Python workload generator (profiles A–G) and a benchmark
-  harness that replays identical traces across policies and seeds, saves raw
-  results, and emits Markdown tables and plots.
-- A performance report with measured simulation results and workload-specific
-  conclusions (`docs/performance-report.md`).
-- Architecture, scheduling-policy, benchmark-methodology, and performance
-  documentation, plus Docker for reproducible experiments.
+  `ExecutionBackend` interface with mock and simulator adapters.
+- A **runtime coordinator** that wires ingress → admission → policy → resources
+  → backend on a single scheduling goroutine, with graceful shutdown.
+- An **HTTP API**: submit, query state, cancel, scheduler status, resource usage,
+  and Prometheus `/metrics` — with bounded labels and structured logs.
+- A reproducible Python workload generator and benchmark harness, and a
+  performance report with measured simulation results.
+- Docker for reproducible experiments.
 
 Not yet implemented (see [docs/architecture.md](docs/architecture.md) for the
-full phase map): the HTTP API, Prometheus metrics, coordinator wiring, and the
-Rust core.
+full phase map): the optional Rust scheduling core and a real inference backend.
 
 ## Requirements
 
@@ -60,6 +59,31 @@ go test -race ./...
 ```
 
 ## Demo
+
+Run the HTTP runtime (mock execution backend):
+
+```sh
+make build
+./bin/infersched -serve -addr :8080 -policy sjf
+```
+
+Then, from another shell:
+
+```sh
+# submit a request
+curl -s -X POST localhost:8080/v1/requests \
+  -d '{"prompt_tokens":128,"expected_output_tokens":32,"priority":50}'
+# {"id":"req-...","state":"QUEUED"}
+
+# query it, scheduler and resources
+curl -s localhost:8080/v1/requests/<id>
+curl -s localhost:8080/v1/scheduler
+curl -s localhost:8080/v1/resources
+
+# cancel and scrape metrics
+curl -s -X POST localhost:8080/v1/requests/<id>/cancel
+curl -s localhost:8080/metrics
+```
 
 Validate a workload trace:
 
@@ -128,6 +152,7 @@ internal/workload/     versioned JSONL trace format             (Phase 1)
 internal/admission/    bounded admission control                (Phase 3)
 internal/resources/    compute + KV-cache accounting            (Phase 3)internal/backend/      execution backend interface              (Phase 4)
 internal/api/          HTTP ingress                             (Phase 6)
+internal/coordinator/  runtime wiring + lifecycle               (Phase 6)
 internal/observability/ Prometheus metrics + logs               (Phase 6)
 internal/simulator/    discrete-event continuous batching        (Phase 4)
 simulator/cmd/sim/     simulator replay CLI                     (Phase 4)

@@ -11,16 +11,16 @@ can tell what is implemented from what is planned.
 
 | # | Component | Package | Phase |
 |---|-----------|---------|-------|
-| 1 | Request ingress + validation | `internal/api` | 6 |
+| 1 | Request ingress + validation | `internal/api` | **6** |
 | 2 | Bounded admission controller | `internal/admission` | **3** |
 | 3 | Request metadata + lifecycle | `internal/lifecycle` | **1** |
 | 4 | Scheduling policy engine | `internal/scheduler` | 1 (interface + FIFO), **2** (priority, SJF, EDF, hybrid, aging) |
 | 5 | Compute + memory resource manager | `internal/resources` | **3** |
 | 6 | Continuous-batching simulator | `internal/simulator` | **4** |
-| 7 | Execution backend interface | `internal/backend` | **4** |
-| 8 | Metrics + tracing | `internal/observability` | 6 |
-| 9 | Workload generator + benchmark harness | `benchmarks/`, `internal/workload` | **1** (format), 5 (generator) |
-| — | Coordinator wiring | `internal/coordinator` | 6 |
+| 7 | Execution backend interface | `internal/backend` | **4** (mock + sim adapters **6**) |
+| 8 | Metrics + tracing | `internal/observability` | **6** |
+| 9 | Workload generator + benchmark harness | `benchmarks/`, `internal/workload` | 1 (format), **5** (generator) |
+| — | Coordinator wiring | `internal/coordinator` | **6** |
 | — | Rust scheduling core | `crates/scheduler-core` | 7 (optional) |
 
 ## Data flow (target)
@@ -138,6 +138,60 @@ The simulator's assumptions and limitations are specified in
 [`benchmark-methodology.md`](benchmark-methodology.md). **All simulator output is
 modelled, not measured.**
 
+## Runtime coordinator, API, and observability (components 1, 8, and wiring — Phase 6)
+
+### Coordinator (`internal/coordinator`)
+
+The coordinator owns the running runtime. It runs a **single scheduling
+goroutine** (`run.go`) so that all lifecycle mutations, admission-counter
+updates, and resource release happen serialized; the admission controller's
+counters therefore need no internal locking, while the resource manager remains
+independently concurrency-safe.
+
+Each loop iteration: drains backend results, expires deadlines, evaluates
+admission for newly submitted requests, then orders admitted requests with the
+policy and starts as many as capacity allows by reserving resources and calling
+`Backend.Submit`. Terminal transitions release resources **exactly once**
+(guarded by a per-record flag and the request's own state machine).
+
+Shutdown cancels queued and running work, drives every outstanding record to a
+terminal state, releases resources, closes the backend, and wakes waiting
+callers. It is idempotent and context-bounded.
+
+### Execution backends (`internal/backend`)
+
+- `MockBackend` — deterministic, configurable duration, supports cancellation
+  and a fail-every-N mode for lifecycle/failure tests.
+- `SimBackend` — adapts the discrete-event simulator to the `ExecutionBackend`
+  interface (trace-oriented: buffers submissions, executes on `RunAll`/`Close`).
+
+### HTTP API (`internal/api`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/v1/requests` | submit a request (JSON; unknown fields rejected) |
+| GET | `/v1/requests/{id}` | query request state |
+| POST | `/v1/requests/{id}/cancel` | cancel a request |
+| DELETE | `/v1/requests/{id}` | cancel a request |
+| GET | `/v1/scheduler` | scheduler/policy status and counters |
+| GET | `/v1/resources` | resource occupancy |
+| GET | `/metrics` | Prometheus text exposition |
+| GET | `/healthz` | liveness |
+
+The API is thin: it validates input, delegates to the coordinator, and
+serializes responses. `http.Server` timeouts are set; request bodies are
+size-bounded (1 MiB) and unknown JSON fields are rejected.
+
+### Metrics and logging (`internal/observability`)
+
+Prometheus text exposition with a **dependency-free** implementation. Every
+label value is drawn from a closed set (lifecycle states, bounded rejection
+reasons, outcomes, policy names); request IDs and user-supplied strings are
+**never** used as labels, so clients cannot create unbounded cardinality.
+Structured JSON logs record the request lifecycle (`request.submitted`,
+`request.admitted`, `request.started`, `request.terminal`, ...) with the request
+ID as a field.
+
 ## Request lifecycle (component 3)
 
 A request is created in `QUEUED` and moves through an explicit, tabulated state
@@ -221,12 +275,13 @@ simulator, or the benchmark harness.
 - Monotonic time everywhere internally.
 - Determinism is a testable property: same seed + same trace ⇒ identical output.
 
-## Limitations (through Phase 4)
+## Limitations (through Phase 6)
 
-- No HTTP API or metrics yet; the coordinator does not yet wire components
-  together at runtime (the `sim` command drives the simulator directly).
-- Admission, resources, and policies are integrated through the simulator, but
-  the coordinator/API layer that owns their lifecycle is Phase 6.
+- The default `-serve` execution backend is a mock; the simulator backend is
+  available through `ExecutionBackend` but has not yet been wired as the default
+  server backend. No real inference engine is integrated (Phase 7, optional).
 - All cost figures are model parameters; no real backend has been measured.
-  Absolute latencies are illustrative; only relative policy behaviour is
-  meaningful until calibration.
+- Metrics are dependency-free rather than using `client_golang`; the exposition
+  format is standard, but histograms/summaries are not implemented.
+- The coordinator exposes request-level lifecycle (submit/status/cancel); there
+  is no streaming/token-level API.

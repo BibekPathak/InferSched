@@ -4,7 +4,7 @@ PYTHON   ?= python3
 PKG      := github.com/BibekP/infersched
 BIN      := bin/infersched
 
-.PHONY: all build test test-race vet fmt lint clean run sim bench bench-quick plots gen-workloads help
+.PHONY: all build test test-race vet fmt lint clean run serve sim bench bench-quick plots gen-workloads help
 
 all: fmt vet test build
 
@@ -28,6 +28,10 @@ lint: vet
 
 run: build
 	$(BIN)
+
+# Run the HTTP runtime backed by the mock execution backend.
+serve: build
+	$(BIN) -serve -addr :8080 -policy fifo
 
 sim:
 	$(GO) run ./simulator/cmd/sim -trace benchmarks/workloads/sample-short-interactive.jsonl
@@ -61,6 +65,7 @@ help:
 	@echo "make test-race   - run tests with the race detector"
 	@echo "make fmt/vet     - format and vet"
 	@echo "make run         - build and run the coordinator"
+	@echo "make serve       - run the HTTP runtime on :8080 (mock backend)"
 	@echo "make sim         - replay the sample trace through the simulator"
 	@echo "make bench       - full benchmark suite + plots (SIMULATION output)"
 	@echo "make bench-quick - quick single-seed benchmark"

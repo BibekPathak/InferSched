@@ -17,6 +17,9 @@ COPY --from=build /out/sim /app/bin/sim
 COPY --from=build /out/infersched /app/bin/infersched
 COPY benchmarks ./benchmarks
 ENV PATH="/app/bin:${PATH}"
+# The HTTP runtime listens on :8080 when run with `infersched -serve`.
+EXPOSE 8080
 # Default: generate workloads and run the benchmark suite, writing to a mounted
-# volume at /app/benchmarks/results.
+# volume at /app/benchmarks/results. To run the HTTP runtime instead, override
+# the command with: docker run ... infersched:dev infersched -serve -addr :8080
 CMD ["python3", "benchmarks/scripts/run_benchmarks.py", "--out", "benchmarks/results", "--seeds", "1,2,3", "--suite", "profiles,sweep,capacity"]

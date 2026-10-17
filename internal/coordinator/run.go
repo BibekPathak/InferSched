@@ -1,0 +1,359 @@
+package coordinator
+
+import (
+	"time"
+
+	"github.com/BibekP/infersched/internal/backend"
+	"github.com/BibekP/infersched/internal/lifecycle"
+	"github.com/BibekP/infersched/internal/observability"
+	"github.com/BibekP/infersched/internal/resources"
+)
+
+// tickInterval bounds how long the loop sleeps without an event, so deadlines
+// are checked even in the absence of arrivals or completions.
+const tickInterval = 10 * time.Millisecond
+
+// run is the single scheduling goroutine. All lifecycle mutations and resource
+// releases happen here, serialized, so the admission controller and the
+// pending/order slices need no additional locking.
+func (c *Coordinator) run() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	for {
+		c.drainBackendResults()
+		c.expireDeadlines()
+		c.admitIncoming()
+		c.schedule()
+
+		if c.isClosedAndDrained() {
+			c.finalizeShutdown()
+			close(c.done)
+			return
+		}
+
+		select {
+		case <-c.wakeup:
+		case res, ok := <-c.backendResults:
+			if !ok {
+				c.backendResults = nil
+				continue
+			}
+			c.applyResult(res)
+		case <-ticker.C:
+		}
+	}
+}
+
+// isClosedAndDrained reports whether shutdown can complete. After Close the
+// backend stops delivering results, so shutdown drives remaining records to a
+// terminal state itself in finalizeShutdown; here we only require that no
+// admission or scheduling work remains.
+func (c *Coordinator) isClosedAndDrained() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed && len(c.incoming) == 0 && len(c.order) == 0
+}
+
+// finalizeShutdown cancels and finalizes any requests still outstanding, then
+// closes the backend and reports final metrics. Running requests are cancelled
+// because the runtime is stopping; their resources are released exactly once.
+func (c *Coordinator) finalizeShutdown() {
+	c.mu.Lock()
+	var remaining []*record
+	for _, rec := range c.records {
+		if rec.outcome == "" {
+			remaining = append(remaining, rec)
+		}
+	}
+	c.mu.Unlock()
+
+	for _, rec := range remaining {
+		_ = c.cfg.Backend.Cancel(backend.Handle{RequestID: rec.req.ID})
+		st := rec.req.State()
+		switch st {
+		case lifecycle.StateQueued:
+			c.adm.Dequeue(rec.req)
+			c.adm.MarkDone(rec.req)
+			rec.req.Reject()
+			c.finish(rec, backend.OutcomeFailed, lifecycle.ReasonShutdown)
+		case lifecycle.StateRunning:
+			rec.req.Cancel()
+			c.finish(rec, backend.OutcomeCancelled, lifecycle.ReasonShutdown)
+		}
+	}
+
+	if c.cfg.Backend != nil {
+		_ = c.cfg.Backend.Close()
+	}
+	c.publishResourceGauges()
+}
+
+// drainBackendResults applies any buffered backend results without blocking.
+func (c *Coordinator) drainBackendResults() {
+	if c.backendResults == nil {
+		return
+	}
+	for {
+		select {
+		case res, ok := <-c.backendResults:
+			if !ok {
+				c.backendResults = nil
+				return
+			}
+			c.applyResult(res)
+		default:
+			return
+		}
+	}
+}
+
+// admitIncoming evaluates admission for submitted requests in arrival order.
+func (c *Coordinator) admitIncoming() {
+	c.mu.Lock()
+	incoming := c.incoming
+	c.incoming = nil
+	c.mu.Unlock()
+
+	for _, rec := range incoming {
+		d := c.adm.Evaluate(rec.req)
+		if !d.Admit {
+			c.reject(rec, d.Reason)
+			continue
+		}
+		// A request larger than the entire pool can never run.
+		blocks := c.res.Config().BlocksForTokens(rec.kvTokens)
+		if blocks > c.res.TotalKVBlocks() {
+			c.reject(rec, lifecycle.ReasonOverloadTokens)
+			continue
+		}
+		c.adm.Commit(rec.req)
+		rec.admitted = true
+		rec.admitNS = c.clock()
+		rec.reason = lifecycle.ReasonNone
+
+		c.mu.Lock()
+		c.stats.admitted++
+		c.order = append(c.order, rec)
+		c.mu.Unlock()
+		c.met.IncCounter(observability.MetricRequestsAdmitted, nil)
+		c.log.Info(string(observability.EventAdmitted), "id", rec.req.ID)
+	}
+}
+
+// schedule orders admitted requests via the policy and starts as many as the
+// resource capacity allows, submitting each to the backend.
+func (c *Coordinator) schedule() {
+	c.mu.Lock()
+	pending := append([]*record(nil), c.order...)
+	c.mu.Unlock()
+	if len(pending) == 0 {
+		c.publishResourceGauges()
+		return
+	}
+
+	reqs := make([]*lifecycle.Request, len(pending))
+	for i, rec := range pending {
+		reqs[i] = rec.req
+	}
+	ordered := c.pol.Order(reqs)
+	c.mu.Lock()
+	c.stats.decisions++
+	c.mu.Unlock()
+	c.met.IncCounter(observability.MetricSchedulingDecisions, map[string]string{"policy": c.pol.Name()})
+
+	started := make(map[string]bool)
+	for _, req := range ordered {
+		rec := c.recordFor(req.ID)
+		if rec == nil || rec.started {
+			continue
+		}
+		if _, err := c.res.Reserve(resources.Need{RequestID: rec.req.ID, KVTokens: rec.kvTokens}); err != nil {
+			// Capacity unavailable; leave it queued for a later pass.
+			continue
+		}
+		if err := rec.req.Admit(); err != nil {
+			c.res.Release(rec.req.ID)
+			continue
+		}
+		if err := rec.req.Start(); err != nil {
+			c.res.Release(rec.req.ID)
+			continue
+		}
+		if _, err := c.cfg.Backend.Submit(rec.req); err != nil {
+			rec.req.Fail()
+			c.res.Release(rec.req.ID)
+			c.finish(rec, backend.OutcomeFailed, lifecycle.ReasonWorkerFailure)
+			continue
+		}
+		rec.started = true
+		rec.startNS = c.clock()
+		started[rec.req.ID] = true
+		c.adm.Dequeue(rec.req)
+		c.adm.MarkOutstanding()
+		c.met.IncCounter(observability.MetricRequestsSubmitted, map[string]string{"state": "running"})
+		c.log.Info(string(observability.EventStarted), "id", rec.req.ID)
+	}
+
+	// Remove started requests from the pending order.
+	if len(started) > 0 {
+		c.mu.Lock()
+		kept := c.order[:0]
+		for _, rec := range c.order {
+			if !started[rec.req.ID] {
+				kept = append(kept, rec)
+			}
+		}
+		c.order = kept
+		c.mu.Unlock()
+	}
+	c.publishResourceGauges()
+}
+
+// applyResult applies a backend result, releasing resources exactly once.
+func (c *Coordinator) applyResult(res backend.Result) {
+	rec := c.recordFor(res.RequestID)
+	if rec == nil {
+		return
+	}
+	switch res.Outcome {
+	case backend.OutcomeCompleted:
+		if err := rec.req.Complete(); err != nil {
+			c.log.Warn("complete_transition_failed", "id", rec.req.ID, "err", err.Error())
+			return
+		}
+		c.finish(rec, backend.OutcomeCompleted, lifecycle.ReasonCompleted)
+		if rec.req.HasDeadline() && c.clock() > rec.req.Deadline {
+			c.mu.Lock()
+			c.stats.deadlineMiss++
+			c.mu.Unlock()
+			c.met.IncCounter(observability.MetricDeadlineMisses, nil)
+		}
+	case backend.OutcomeCancelled:
+		rec.req.Cancel()
+		c.finish(rec, backend.OutcomeCancelled, lifecycle.ReasonClientCancel)
+	case backend.OutcomeFailed:
+		rec.req.Fail()
+		c.finish(rec, backend.OutcomeFailed, lifecycle.ReasonWorkerFailure)
+	case backend.OutcomeExpired:
+		rec.req.Expire()
+		c.finish(rec, backend.OutcomeExpired, lifecycle.ReasonTimeout)
+	}
+}
+
+// expireDeadlines expires admitted-but-not-started or running requests whose
+// deadline has passed.
+func (c *Coordinator) expireDeadlines() {
+	now := c.clock()
+	c.mu.Lock()
+	var expiredQueued []*record
+	kept := c.order[:0]
+	for _, rec := range c.order {
+		if rec.req.HasDeadline() && rec.req.Deadline <= now {
+			expiredQueued = append(expiredQueued, rec)
+			continue
+		}
+		kept = append(kept, rec)
+	}
+	c.order = kept
+	c.mu.Unlock()
+
+	for _, rec := range expiredQueued {
+		c.adm.Dequeue(rec.req)
+		c.adm.MarkDone(rec.req)
+		rec.req.Expire()
+		c.finish(rec, backend.OutcomeExpired, lifecycle.ReasonTimeout)
+	}
+
+	// Running requests past their deadline are cancelled via the backend.
+	c.mu.Lock()
+	var runningExpired []*record
+	for _, rec := range c.records {
+		if rec.started && rec.outcome == "" && rec.req.HasDeadline() &&
+			rec.req.State() == lifecycle.StateRunning && rec.req.Deadline <= now {
+			runningExpired = append(runningExpired, rec)
+		}
+	}
+	c.mu.Unlock()
+	for _, rec := range runningExpired {
+		_ = c.cfg.Backend.Cancel(backend.Handle{RequestID: rec.req.ID})
+	}
+}
+
+// reject records a rejection and updates metrics.
+func (c *Coordinator) reject(rec *record, reason lifecycle.Reason) {
+	rec.req.Reject()
+	c.finish(rec, backend.OutcomeFailed, reason)
+	c.mu.Lock()
+	c.stats.rejected++
+	c.mu.Unlock()
+	c.met.IncCounter(observability.MetricRequestsRejected, map[string]string{"reason": string(reason)})
+	c.log.Info(string(observability.EventRejected), "id", rec.req.ID, "reason", string(reason))
+}
+
+// finish releases resources (exactly once) and records the terminal outcome.
+func (c *Coordinator) finish(rec *record, outcome backend.Outcome, reason lifecycle.Reason) {
+	c.mu.Lock()
+	if rec.outcome != "" {
+		c.mu.Unlock()
+		return
+	}
+	rec.outcome = outcome
+	rec.reason = reason
+	rec.endNS = c.clock()
+	started := rec.started
+	released := rec.released
+	rec.released = true
+	c.mu.Unlock()
+
+	if started && !released {
+		if _, err := c.res.Release(rec.req.ID); err != nil {
+			c.log.Warn("release_failed", "id", rec.req.ID, "err", err.Error())
+		}
+		c.adm.MarkDone(rec.req)
+	}
+
+	outcomeLabel := string(outcome)
+	switch outcome {
+	case backend.OutcomeCompleted:
+		c.met.IncCounter(observability.MetricRequestsCompleted, map[string]string{"outcome": "completed"})
+	case backend.OutcomeCancelled:
+		c.met.IncCounter(observability.MetricRequestsCompleted, map[string]string{"outcome": "cancelled"})
+	case backend.OutcomeExpired:
+		c.met.IncCounter(observability.MetricRequestsCompleted, map[string]string{"outcome": "expired"})
+	case backend.OutcomeFailed:
+		if isRejection(reason) {
+			// counted via reject()
+		} else {
+			c.met.IncCounter(observability.MetricRequestsCompleted, map[string]string{"outcome": "failed"})
+		}
+	}
+	c.log.Info("request.terminal", "id", rec.req.ID, "outcome", outcomeLabel, "reason", string(reason))
+}
+
+// recordFor returns the record for id, or nil.
+func (c *Coordinator) recordFor(id string) *record {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.records[id]
+}
+
+// publishResourceGauges updates the resource gauges.
+func (c *Coordinator) publishResourceGauges() {
+	snap := c.res.Snapshot()
+	c.met.SetGauge(observability.MetricSlotsUsed, nil, int64(snap.SlotsUsed))
+	c.met.SetGauge(observability.MetricKVBlocksUsed, nil, int64(snap.KVBlocksUsed))
+	c.met.SetGauge(observability.MetricActiveSequences, nil, int64(snap.ActiveSequences))
+	c.met.SetGauge(observability.MetricQueueDepth, nil, int64(len(c.order)))
+}
+
+func isRejection(r lifecycle.Reason) bool {
+	switch r {
+	case lifecycle.ReasonOverloadQueue, lifecycle.ReasonOverloadTokens,
+		lifecycle.ReasonOverloadFlights, lifecycle.ReasonOverloadTenant,
+		lifecycle.ReasonDeadlineMiss:
+		return true
+	}
+	return false
+}
